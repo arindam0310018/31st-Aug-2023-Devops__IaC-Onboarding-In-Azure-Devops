@@ -1,0 +1,538 @@
+######################
+# START OF PIPELINE:-
+######################
+
+trigger:
+  none
+
+######################
+#DECLARE PARAMETERS:-
+######################
+parameters:
+
+- name: TenantID
+  displayName: Tenant ID details follows below:-
+  type: string
+  default: 20516b3d-42af-4bd4-b2e6-e6b4051af72a
+  values:
+  - 20516b3d-42af-4bd4-b2e6-e6b4051af72a
+
+- name: SubscriptionName
+  displayName: Subscription Name details follows below:-
+  type: string
+  default: AM-PROD-VS
+  values:
+  - AM-PROD-VS
+
+- name: SubscriptionID
+  displayName: Subscription ID details follows below:-
+  type: string
+  default: 210e66cb-55cf-424e-8daa-6cad804ab604
+  values:
+  - 210e66cb-55cf-424e-8daa-6cad804ab604
+
+- name: DevOpsOrganisation
+  type: string
+  default: https://dev.azure.com/ArindamMitra0251
+  values:
+  - https://dev.azure.com/ArindamMitra0251
+
+- name: DevOpsProjName
+  type: string
+  default: ArindamMitra
+  values:
+  - ArindamMitra
+
+- name: RGName
+  displayName: Please Provide the Resource Group Name:-
+  type: object
+  default: Demo-Blog-RG
+
+- name: KVName
+  displayName: Please Provide the Keyvault Name:-
+  type: object
+  default: ampockv 
+
+- name: SPIName
+  displayName: Please Provide the Service Principal Name:-
+  type: object
+  default: Test-SPI-2000
+
+- name: Username
+  displayName: Please Provide the Username:-
+  type: object
+  default: U1@mitra008.onmicrosoft.com
+  
+- name: SourceRepoName
+  type: object
+  default: Test-Repo
+
+- name: DestinationRepoName
+  type: object
+  default: AM100
+  
+- name: SrvConnectionName
+  type: object
+  default: AM-Srv-Connection
+  
+######################
+#DECLARE VARIABLES:-
+######################
+variables:
+  ServiceConnection: amcloud-cicd-service-connection
+  BuildAgent: ubuntu-latest
+  envName: NonProd
+  MSGraphAPI: 00000003-0000-0000-c000-000000000000
+  MSGraphUsrRead: e1fe6dd8-ba31-4d61-89e7-88639da4683d
+  MSGraphUsrReadAll: a154be20-db9c-4678-8ab7-66f6cc099a59
+  MSGraphGrpReadAll: 5f8c59db-677d-491f-a6b8-5f174b11ec1d
+  DevOpsGITUser: AM
+  DevOpsGITEmail: arindam0310018@gmail.com
+  DevOpsOrganisationWithoutHTTPS: dev.azure.com/ArindamMitra0251
+  DevOpsOrganisationName: ArindamMitra0251
+  DevOpsEnv: AM-DEV
+  
+######################
+#DECLARE BUILD AGENT:-
+######################
+pool:
+  vmImage: $(BuildAgent)
+
+###################
+#DECLARE STAGES:-
+###################
+stages:
+
+###########################################################################################################
+#STAGE 1: VALIDATE RESOURCE GROUP, KEYVAULT AND SERVICE PRINCIPAL. IF ALL OK, CREATE SERVICE PRINCIPAL:-
+###########################################################################################################
+
+- stage: Az_Validate_Create_RG_Keyvault_and_ServicePrincipal
+  jobs:
+  - job: Az_Validate_Create_RG_Keyvault_and_ServicePrincipal
+    displayName: Azure Validate Create RG Keyvault and Service Principal
+    steps:
+    - task: AzureCLI@2
+      displayName: Validate Create RG Keyvault and Service Principal
+      inputs:
+        azureSubscription: $(ServiceConnection)
+        scriptType: pscore
+        scriptLocation: inlineScript
+        inlineScript: |
+          az --version
+          az account set --subscription ${{ parameters.SubscriptionID }}
+          az account show
+          $i = az ad sp list --display-name ${{ parameters.SPIName }} --query [].appDisplayName -o tsv
+          if ($i -ne "${{ parameters.SPIName }}") {
+            $j = az group exists -n ${{ parameters.RGName }}
+                if ($j -eq "true") {
+                  $k = az keyvault list --resource-group ${{ parameters.RGName }} --query [].name -o tsv		
+                      if ($k -eq "${{ parameters.KVName }}") {
+                        $spipasswd = az ad sp create-for-rbac -n ${{ parameters.SPIName }} --query "password" -o tsv
+                        $spiID = az ad sp list --display-name ${{ parameters.SPIName }} --query [].appId -o tsv
+                        az keyvault secret set --name ${{ parameters.SPIName }}-passwd --vault-name ${{ parameters.KVName }} --value $spipasswd
+                        az keyvault secret set --name ${{ parameters.SPIName }}-id --vault-name ${{ parameters.KVName }} --value $spiID
+                        echo "##################################################################"
+                        echo "Service Principal ${{ parameters.SPIName }} created successfully. App ID and Secret Stored inside Key Vault ${{ parameters.KVName }} in the Resource Group ${{ parameters.RGName }}!!!"
+                        echo "##################################################################"
+                        }				
+                      else {
+                      echo "##################################################################"
+                      echo "Key Vault ${{ parameters.KVName }} DOES NOT EXISTS in Resource Group ${{ parameters.RGName }}!!!"
+                      echo "##################################################################"
+                      exit 1
+                          }
+                }
+                else {
+                echo "##################################################################"
+                echo "Resource Group ${{ parameters.RGName }} DOES NOT EXISTS!!!"
+                echo "##################################################################"
+                exit 1
+                    }
+          }
+          else {
+          echo "#################################################################################################"
+          echo "Service Principal ${{ parameters.SPIName }} EXISTS and hence Cannot Proceed with Deployment!!!"
+          echo "#################################################################################################"
+          exit 1
+              }
+###################################################
+#STAGE 2: Add MS Graph API Permission and Owner:-
+###################################################
+
+- stage: Az_Add_MS_Graph_API_Owner_SPI
+  condition: |
+     and(succeeded(), 
+       eq(variables['build.sourceBranch'], 'refs/heads/main')
+     )
+  jobs:
+  - deployment: 
+    displayName: Azure Add MS Graph API and Owner in Service Principal
+    environment: '$(envName)'
+    pool:
+      vmImage: $(BuildAgent)
+    strategy:
+      runOnce:
+        deploy:
+          steps:          
+          - task: AzureCLI@2
+            displayName: MS Graph API Permissions
+            inputs:
+              azureSubscription: $(ServiceConnection)
+              scriptType: pscore
+              scriptLocation: inlineScript
+              inlineScript: |
+                $appid = az ad app list --display-name ${{ parameters.SPIName }} --query [].appId -o tsv
+                az ad app permission add --id $appid --api $(MSGraphAPI) --api-permissions $(MSGraphUsrRead)=Scope
+                az ad app permission add --id $appid --api $(MSGraphAPI) --api-permissions $(MSGraphUsrReadAll)=Scope
+                az ad app permission add --id $appid --api $(MSGraphAPI) --api-permissions $(MSGraphGrpReadAll)=Scope
+                echo "##################################################################"
+                echo "MS Graph API Permissions has been configured successfully!!!"
+                echo "##################################################################"
+          - task: AzureCLI@2
+            displayName: Set App Owner
+            inputs:
+              azureSubscription: $(ServiceConnection)
+              scriptType: pscore
+              scriptLocation: inlineScript
+              inlineScript: |
+                $appid = az ad app list --display-name ${{ parameters.SPIName }} --query [].appId -o tsv
+                $uid = az ad user show --id ${{ parameters.Username }} --query "id" -o tsv
+                az ad app owner add --id $appid --owner-object-id $uid
+                echo "##################################################################"
+                echo "Owner ${{ parameters.Username }} added successfully!!!"
+                echo "##################################################################"
+
+##################################
+#STAGE 3: Validate Source Repo:-
+##################################
+
+- stage: Az_DevOps_Validate_Source_Repo
+  condition: |
+     and(succeeded(), 
+       eq(variables['build.sourceBranch'], 'refs/heads/main')
+     )
+  jobs:
+  - job: Az_DevOps_Validate_Source_Repo
+    displayName: Az DevOps Validate Source Repository
+    steps:
+########################################################
+# Install Az DevOps CLI Extension in the Build Agent:-
+#######################################################
+    - task: AzureCLI@1
+      displayName: Install Devops CLI Extension
+      inputs:
+        azureSubscription: '$(ServiceConnection)'
+        scriptType: pscore
+        scriptLocation: inlineScript
+        inlineScript: |
+          az extension add --name azure-devops
+          az extension show --name azure-devops --output table 
+
+###############################################################
+# Help Option of Az DevOps CLI Extension in the Build Agent:-
+###############################################################
+    - task: PowerShell@2
+      displayName: Help option of Az DevOps CLI
+      inputs:
+        targetType: 'inline'
+        script: |
+          az devops -h
+
+################################        
+# Download Keyvault Secrets:-
+################################
+    - task: AzureKeyVault@2
+      displayName: Fetch all Secrets from Keyvault
+      inputs:
+        azureSubscription: '$(ServiceConnection)'
+        KeyVaultName: '${{ parameters.KVNAME }}'
+        SecretsFilter: '*'
+        RunAsPreJob: false
+
+#################################################
+# Validate Source Repository in DevOps Project:-
+#################################################
+    - task: PowerShell@2
+      displayName: Validate Source Repo Name
+      inputs: 
+        targetType: 'inline'
+        script: |
+         echo "$(PAT)" | az devops login
+         az devops configure --defaults organization=${{ parameters.DevOpsOrganisation }} project=${{ parameters.DevOpsProjName }}
+         $reponame = az repos show --repository ${{ parameters.SourceRepoName }} --query "name" -o tsv
+         if ($reponame -eq "${{ parameters.SourceRepoName }}") {
+              echo "#####################################################"
+              echo "Repository ${{ parameters.SourceRepoName }} exists!!!"
+              echo "#####################################################"              
+            }
+            else {
+              echo "#############################################################"
+              echo "Repository ${{ parameters.SourceRepoName }} DOES NOT exists!!!"
+              echo "#############################################################"
+              exit 1
+            }
+
+#############################################################
+#STAGE 4: Validate Create and Initialise Destination Repo:-
+#############################################################
+
+- stage: Az_DevOps_Validate_Create_Initialise_Destination_Repo
+  condition: |
+     and(succeeded(), 
+       eq(variables['build.sourceBranch'], 'refs/heads/main')
+     )
+  jobs:
+  - job: Az_DevOps_Validate_Create_Initialise_Destination_Repo
+    displayName: Az DevOps Validate Create and Initialise Destination Repository
+    steps:
+########################################################
+# Install Az DevOps CLI Extension in the Build Agent:-
+#######################################################
+    - task: AzureCLI@1
+      displayName: Install Devops CLI Extension
+      inputs:
+        azureSubscription: '$(ServiceConnection)'
+        scriptType: pscore
+        scriptLocation: inlineScript
+        inlineScript: |
+          az extension add --name azure-devops
+          az extension show --name azure-devops --output table 
+
+###############################################################
+# Help Option of Az DevOps CLI Extension in the Build Agent:-
+###############################################################
+    # - task: PowerShell@2
+    #   displayName: Help option of Az DevOps CLI
+    #   inputs:
+    #     targetType: 'inline'
+    #     script: |
+    #       az devops -h
+
+################################        
+# Download Keyvault Secrets:-
+################################
+    - task: AzureKeyVault@2
+      displayName: Fetch all Secrets from Keyvault
+      inputs:
+        azureSubscription: '$(ServiceConnection)'
+        KeyVaultName: '${{ parameters.KVNAME }}'
+        SecretsFilter: '*'
+        RunAsPreJob: false
+
+#############################################################################
+# Validate Create and Initialise Destination Repository in DevOps Project:-
+#############################################################################
+    - task: PowerShell@2
+      displayName: Validate Create and Initialise Destination Repo
+      inputs:
+        targetType: 'inline'
+        script: |
+         echo "$(PAT)" | az devops login
+         az devops configure --defaults organization=${{ parameters.DevOpsOrganisation }} project=${{ parameters.DevOpsProjName }}
+         $reponame = az repos show --repository ${{ parameters.DestinationRepoName }} --query "name" -o tsv
+         if ($reponame -eq "${{ parameters.DestinationRepoName }}") {
+              echo "#####################################################"
+              echo "Repository ${{ parameters.DestinationRepoName }} exists!!!"
+              echo "#####################################################"              
+            }
+            else {
+              az repos create --name ${{ parameters.DestinationRepoName }} -p ${{ parameters.DevOpsProjName }} --org ${{ parameters.DevOpsOrganisation }} --output table
+              
+              echo "###########################################################################"
+              echo "Repository ${{ parameters.DestinationRepoName }} created successfully!!!"
+              echo "############################################################################"
+              
+              mkdir ${{ parameters.DestinationRepoName }}
+              git config --global user.email "$(DevOpsGITEmail)"
+              git config --global user.name "$(DevOpsGITUser)"
+              git config --global init.defaultBranch main
+              git config --global --unset https.proxy
+         
+              cd ${{ parameters.DestinationRepoName }}
+              git init
+              "REPO NAME: ${{ parameters.DestinationRepoName }}" > README.md
+              git add .
+              git commit -m "Initial commit"
+              git remote add origin "${{ parameters.DevOpsOrganisation }}/${{ parameters.DevOpsProjName }}/_git/${{ parameters.DestinationRepoName }}"
+              git push https://$(DevOpsGITUser):$(PAT)@$(DevOpsOrganisationWithoutHTTPS)/${{ parameters.DevOpsProjName }}/_git/${{ parameters.DestinationRepoName }}
+              echo "##############################################################################"
+              echo "Repository ${{ parameters.DestinationRepoName }} Initialised successfully!!!"
+              echo "##############################################################################"
+            }
+#############################################################
+#STAGE 5: Import Data from Source to Destination Repo:-
+#############################################################
+
+- stage: Az_DevOps_Import_Repo
+  condition: |
+     and(succeeded(), 
+       eq(variables['build.sourceBranch'], 'refs/heads/main')
+     )
+  jobs:
+  - job: Az_DevOps_Import_Repo
+    displayName: Az DevOps Import Repository
+    steps:
+    - task: AzureKeyVault@2
+      displayName: Fetch all Secrets from Keyvault
+      inputs:
+        azureSubscription: '$(ServiceConnection)'
+        KeyVaultName: '${{ parameters.KVNAME }}'
+        SecretsFilter: '*'
+        RunAsPreJob: false
+        
+    - task: PowerShell@2
+      displayName: Az DevOps Import Repository
+      inputs:
+        targetType: 'inline'
+        script: |
+          echo "$(PAT)"
+          git clone --bare "https://$(PAT)@$(DevOpsOrganisationWithoutHTTPS)/${{ parameters.DevOpsProjName }}/_git/${{ parameters.SourceRepoName }}"
+          cd ${{ parameters.SourceRepoName }}.git
+          git push --mirror "https://$(PAT)@$(DevOpsOrganisationWithoutHTTPS)/${{ parameters.DevOpsProjName }}/_git/${{ parameters.DestinationRepoName }}"
+          cd ..
+          rm -rf ${{ parameters.SourceRepoName }}.git
+
+########################################
+#STAGE 6: Create Service Connection:-
+#######################################
+- stage: Az_DevOps_Create_Service_Connection  
+  condition: |
+    and(succeeded(), 
+    eq(variables['build.sourceBranch'], 'refs/heads/main')
+    )
+  jobs:
+  - job: Az_DevOps_Create_Service_Connection
+    displayName: Az DevOps Create Service Connection
+    steps:
+
+    - task: AzureKeyVault@2
+      displayName: Fetch all Secrets from Keyvault
+      inputs:
+        azureSubscription: '$(ServiceConnection)'
+        KeyVaultName: '${{ parameters.KVNAME }}'
+        SecretsFilter: '*'
+        RunAsPreJob: false
+
+    - task: PowerShell@2
+      displayName: Az Devops Create Service Connection
+      inputs:
+        targetType: 'inline'
+        script: |
+          echo "$(PAT)" | az devops login
+          az devops configure --defaults organization=${{ parameters.DevOpsOrganisation }} project=${{ parameters.DevOpsProjName }}
+          
+          $B64Pat = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes(":$(PAT)"))
+
+          $devopsProjID = az devops project show --project ${{ parameters.DevOpsProjName }} --query "id" -o tsv
+
+          $header = @{
+            'Authorization' = 'Basic ' + $B64Pat
+            'Content-Type' = 'application/json'
+              }
+              
+          $body = '{
+            "data": {
+            "subscriptionId": "${{ parameters.SubscriptionID }}",
+            "subscriptionName": "${{ parameters.SubscriptionName }}",
+            "environment": "AzureCloud",
+            "scopeLevel": "Subscription",
+            "creationMode": "Manual"
+            },
+            "name": "${{ parameters.SrvConnectionName }}",
+            "type": "AzureRM",
+            "url": "https://management.azure.com/",
+            "authorization": {
+            "parameters": {
+                "tenantid": "${{ parameters.TenantID }}",
+                "serviceprincipalid": "$(${{ parameters.SPIName }}-id)",
+                "authenticationType": "spnKey",
+                "serviceprincipalkey": "$(${{ parameters.SPIName }}-passwd)"
+                },
+            "scheme": "ServicePrincipal"
+                },
+            "isShared": false,
+            "isReady": true,
+            "serviceEndpointProjectReferences": [
+                {
+                "projectReference": {
+                  "id": "d868d9ec-e5d3-4df0-a1ff-f7e2c686e6c7",
+                  "name": "${{ parameters.DevOpsProjName }}"
+                },
+            "name": "${{ parameters.SrvConnectionName }}"
+                  }
+                ]
+                }'
+          
+          $srvEndpointID = Invoke-RestMethod -Method Post -Uri ${{ parameters.DevOpsOrganisation }}/_apis/serviceendpoint/endpoints?api-version=7.0 -Headers $header -Body $body | Select -ExpandProperty id
+
+          echo "#####################################################################################"
+          echo "Service Connection ${{ parameters.SrvConnectionName }} created successfully."
+          echo "#####################################################################################" 
+         
+          $patchbody = '{
+            "allPipelines": {
+            "authorized": true,
+            "authorizedBy": null,
+            "authorizedOn": null
+            },
+            "pipelines": null,
+            "resource": {
+                "id": "$srvEndpointID",
+                "type": "endpoint"
+            }
+          }'
+        
+          Invoke-RestMethod -Method PATCH -Uri ${{ parameters.DevOpsOrganisation }}/${{ parameters.DevOpsProjName }}/_apis/pipelines/pipelinepermissions/endpoint/"$srvEndpointID"?api-version=7.0-preview.1 -Headers $header -Body $patchbody
+
+          echo "###############################################################################################################"
+          echo "Service Connection ${{ parameters.SrvConnectionName }} was granted access permission to all Pipelines."
+          echo "###############################################################################################################"
+
+############################################
+#STAGE 6: Create Azure DevOps Environment:-
+############################################
+
+- stage: Az_DevOps_Create_Environment
+  condition: |
+     and(succeeded(), 
+       eq(variables['build.sourceBranch'], 'refs/heads/main')
+     )
+  jobs:
+  - job: Az_DevOps_Create_Environment
+    displayName: Az DevOps Create Environment
+    steps:
+    - task: AzureKeyVault@2
+      displayName: Fetch all Secrets from Keyvault
+      inputs:
+        azureSubscription: '$(ServiceConnection)'
+        KeyVaultName: '${{ parameters.KVNAME }}'
+        SecretsFilter: '*'
+        RunAsPreJob: false
+
+    - task: PowerShell@2
+      displayName: Az DevOps Create Environment 
+      inputs:
+        targetType: 'inline'
+        script: |
+         echo "$(PAT)" | az devops login
+         az devops configure --defaults organization=${{ parameters.DevOpsOrganisation }} project=${{ parameters.DevOpsProjName }}
+         $env = "$(DevOpsEnv)"
+         $envJSON = @{
+         name = $env
+         description = "My $env environment"
+          }
+         $infile = "envdetails.json"
+         Set-Content -Path $infile -Value ($envJSON | ConvertTo-Json)
+         az devops invoke --area distributedtask --resource environments --route-parameters project=${{ parameters.DevOpsProjName }} --org ${{ parameters.DevOpsOrganisation }} --http-method POST --in-file $infile --api-version "6.0-preview"
+         rm $infile
+
+###################
+# END OF PIPELINE:-
+###################
+
+
+
+
+
+          
